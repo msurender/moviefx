@@ -54,5 +54,4 @@ workflows:
             branches:
               only:
                 - develop
-                - staging
-                - master
+                - main
