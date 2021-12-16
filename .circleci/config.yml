@@ -76,6 +76,7 @@ workflows:
       - deploy-to-heroku:
           requires:
             - build
+            - linting
           filters:
             branches:
               only:

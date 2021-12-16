@@ -3,9 +3,12 @@
         "browser": true,
         "es6": true
     },
+    "plugins": [
+        "react"
+    ],
     "extends": [
-        "plugin:react/recommended",
-        "standard"
+        "eslint:recommended",
+        "plugin:react/recommended"
     ],
     "globals": {
         "Atomics": "readonly",
@@ -23,9 +26,6 @@
         "version": "16.0"
       }
     },
-    "plugins": [
-        "react"
-    ],
     "rules": {
         "semi": [2, "always"],
         "space-before-function-paren": [0, {"anonymous": "always", "named": "always"}],
