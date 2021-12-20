@@ -1,7 +1,7 @@
 version: 2.1
 
-orbs: 
-  slack: circleci/slack@4.5.1 
+orbs:
+  slack: circleci/slack@4.5.1
 
 executors:
   app-executor:
@@ -10,8 +10,46 @@ executors:
     working_directory: ~/repo
   slack-executor:
     docker:
-      - image: 'cimg/base:stable'
+      - image: 'cimg/base:2021.04'
     resource_class: small
+  terraform-executor:
+    docker:
+      - image: hashicorp/terraform:1.1.2
+
+aliases:
+  - &restore-cache
+    restore_cache:
+      keys:
+        - app-v2-{{ checksum "package.json" }}
+        - app-v2-
+  - &install-dependencies
+    run:
+      name: Install dependencies
+      command: |
+        mkdir -p artifacts
+        yarn install
+  - &save-cache
+    save_cache:
+      paths:
+        - node_modules
+      key: app-v2-{{ checksum "package.json" }}
+  - &install-aws-cli
+    run:
+      name: Installing AWS CLI
+      working_directory: /
+      command: |
+        sudo apt-get -y -qq update
+        sudo apt-get install -y awscli
+        sudo apt-get install -y python-pip python-dev build-essential
+  - &build-project
+    run:
+      name: Build Project
+      command: |
+        npm install
+        npm run build
+        cd build
+        zip ../build.zip -r * .[^.]*
+        echo "Build successful"
 
 jobs:
   build:
@@ -19,35 +57,28 @@ jobs:
     steps:
       - checkout
       - run: node --version
+      - run: echo ${CIRCLE_BRANCH}
+      - *restore-cache
+      - *install-dependencies
+      - *save-cache
       - run:
-          name: Show current branch
-          command: echo ${CIRCLE_BRANCH}
-      - restore_cache:
-          keys:
-            - app-v1-{‌{ checksum "package.json" }}
-            - app-v1-
-      - run:
-          name: Install dependencies
-          command: yarn install
-      - save_cache:
+          name: Copy Infrastructure Folder
+          command: |
+            cp -r infrastructure artifacts/infrastructure
+      - persist_to_workspace:
+          root: ./
           paths:
-            - node_modules
-          key: app-v1-{‌{ checksum "package.json" }}
+            - artifacts
 
   linting:
     executor: app-executor
     steps:
       - checkout
       - run: node --version
+      - run: echo ${CIRCLE_BRANCH}
+      - *restore-cache
       - run:
-          name: Show current branch
-          command: echo ${CIRCLE_BRANCH}
-      - restore_cache:
-          keys:
-            - app-v1-{‌{ checksum "package.json" }}
-            - app-v1-
-      - run:
-          name: JS Linting Check
+          name: Run linting
           command: yarn run lint
 
   prettier:
@@ -55,34 +86,95 @@ jobs:
     steps:
       - checkout
       - run: node --version
+      - run: echo ${CIRCLE_BRANCH}
+      - *restore-cache
       - run:
-          name: Show current branch
-          command: echo ${CIRCLE_BRANCH}
-      - restore_cache:
-          keys:
-            - app-v1-{‌{ checksum "package.json" }}
-            - app-v1-
-      - run:
-          name: Run Prettier Check
+          name: Run prettier check
           command: yarn run prettier:check
 
-  deploy-to-heroku:
+  terraform-validate:
+    executor: terraform-executor
+    steps:
+      - checkout
+      - run: echo ${CIRCLE_BRANCH}
+      - run:
+          name: Terraform Validate & Format
+          command: |
+            cd infrastructure/
+            terraform init -backend=false
+            terraform validate
+            terraform fmt -check
+
+  terraform-plan-and-apply:
+    executor: terraform-executor
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ./
+      - run: echo ${CIRCLE_BRANCH}
+      - run:
+          name: Terraform Plan
+          command: |
+            cd artifacts/infrastructure/
+            terraform init
+            terraform workspace select ${CIRCLE_BRANCH} || terraform workspace new ${CIRCLE_BRANCH}
+            terraform plan
+      - run:
+          name: Terraform Apply
+          command: |
+            cd artifacts/infrastructure/
+            terraform workspace select ${CIRCLE_BRANCH}
+            terraform apply --auto-approve
+            terraform output moviesfx_bucket_name > ../moviesfx_bucket_name.txt
+            terraform output cloudfront_distribution_id > ../cloudfront_distribution_id.txt
+      - persist_to_workspace:
+          root: ./
+          paths:
+            - artifacts
+
+  deploy-to-aws-s3:
     executor: app-executor
     steps:
       - checkout
-      - run: node --version
+      - attach_workspace:
+          at: ./
+      - run: echo ${CIRCLE_BRANCH}
+      - *install-aws-cli
+      - *build-project
       - run:
-          name: Show current branch
-          command: echo ${CIRCLE_BRANCH}
-      - run:
-          name: Deploy to Heroku
+          name: Deploy to AWS S3
           command: |
+            AWS_BUCKET_NAME=$(cat artifacts/moviesfx_bucket_name.txt | sed 's/\"//g')
+            echo $AWS_BUCKET_NAME
             if [ "${CIRCLE_BRANCH}" == "main" ]
             then
-              git push https://heroku:$HEROKU_API_KEY@git.heroku.com/moviesfx.git ${CIRCLE_BRANCH}:master -f
+              aws --region ${AWS_REGION} s3 sync ~/repo/build s3://${AWS_BUCKET_NAME} --delete
             else
-              git push https://heroku:$HEROKU_API_KEY@git.heroku.com/moviesfx-dev.git ${CIRCLE_BRANCH}:master -f
+              aws --region ${AWS_REGION} s3 sync ~/repo/build s3://${AWS_BUCKET_NAME} --delete
             fi
+
+  deploy-to-aws-cloudfront:
+    executor: app-executor
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ./
+      - run: echo ${CIRCLE_BRANCH}
+      - *install-aws-cli
+      - *build-project
+      - run:
+          name: Deploy to AWS Cloudfront
+          command: |
+            CLOUDFRONT_DISTRIBUTION_ID=$(cat artifacts/cloudfront_distribution_id.txt | sed 's/\"//g')
+            echo $CLOUDFRONT_DISTRIBUTION_ID
+            aws configure set preview.cloudfront true
+            if [ "${CIRCLE_BRANCH}" == "main" ]
+            then
+              aws cloudfront create-invalidation --distribution-id ${CLOUDFRONT_DISTRIBUTION_ID} --paths /\*
+            else
+              aws cloudfront create-invalidation --distribution-id ${CLOUDFRONT_DISTRIBUTION_ID} --paths /\*
+            fi
+
   notify-via-slack:
     executor: slack-executor
     steps:
@@ -142,7 +234,20 @@ jobs:
                 }
               ]
             }
-  
+
+  terraform-destroy:
+    executor: terraform-executor
+    steps:
+      - checkout
+      - run: echo ${CIRCLE_BRANCH}
+      - run:
+          name: Terraform Destroy
+          command: |
+            cd infrastructure/
+            terraform init
+            terraform workspace select ${CIRCLE_BRANCH} || terraform workspace new ${CIRCLE_BRANCH}
+            terraform destroy --auto-approve
+
 workflows:
   build_and_deploy:
     jobs:
@@ -163,7 +268,7 @@ workflows:
               only:
                 - develop
                 - main
-      - deploy-to-heroku:
+      - terraform-validate:
           requires:
             - linting
             - prettier
@@ -172,9 +277,45 @@ workflows:
               only:
                 - develop
                 - main
+      - terraform-plan-and-apply:
+          requires:
+            - terraform-validate
+          filters:
+            branches:
+              only:
+                - develop
+                - main
+      - deploy-to-aws-s3:
+          requires:
+            - terraform-plan-and-apply
+          filters:
+            branches:
+              only:
+                - develop
+                - main
+      - deploy-to-aws-cloudfront:
+          requires:
+            - deploy-to-aws-s3
+          filters:
+            branches:
+              only:
+                - develop
+                - main
       - notify-via-slack:
           requires:
-            - deploy-to-heroku
+            - deploy-to-aws-cloudfront
+          filters:
+            branches:
+              only:
+                - develop
+                - main
+      - hold:
+          type: approval
+          requires:
+            - deploy-to-aws-cloudfront
+      - terraform-destroy:
+          requires:
+            - hold
           filters:
             branches:
               only:

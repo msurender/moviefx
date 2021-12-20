@@ -1,0 +1,182 @@
+version: 2.1
+
+orbs: 
+  slack: circleci/slack@4.5.1 
+
+executors:
+  app-executor:
+    docker:
+      - image: cimg/node:16.13.1
+    working_directory: ~/repo
+  slack-executor:
+    docker:
+      - image: 'cimg/base:stable'
+    resource_class: small
+
+jobs:
+  build:
+    executor: app-executor
+    steps:
+      - checkout
+      - run: node --version
+      - run:
+          name: Show current branch
+          command: echo ${CIRCLE_BRANCH}
+      - restore_cache:
+          keys:
+            - app-v1-{‌{ checksum "package.json" }}
+            - app-v1-
+      - run:
+          name: Install dependencies
+          command: yarn install
+      - save_cache:
+          paths:
+            - node_modules
+          key: app-v1-{‌{ checksum "package.json" }}
+
+  linting:
+    executor: app-executor
+    steps:
+      - checkout
+      - run: node --version
+      - run:
+          name: Show current branch
+          command: echo ${CIRCLE_BRANCH}
+      - restore_cache:
+          keys:
+            - app-v1-{‌{ checksum "package.json" }}
+            - app-v1-
+      - run:
+          name: JS Linting Check
+          command: yarn run lint
+
+  prettier:
+    executor: app-executor
+    steps:
+      - checkout
+      - run: node --version
+      - run:
+          name: Show current branch
+          command: echo ${CIRCLE_BRANCH}
+      - restore_cache:
+          keys:
+            - app-v1-{‌{ checksum "package.json" }}
+            - app-v1-
+      - run:
+          name: Run Prettier Check
+          command: yarn run prettier:check
+
+  deploy-to-heroku:
+    executor: app-executor
+    steps:
+      - checkout
+      - run: node --version
+      - run:
+          name: Show current branch
+          command: echo ${CIRCLE_BRANCH}
+      - run:
+          name: Deploy to Heroku
+          command: |
+            if [ "${CIRCLE_BRANCH}" == "main" ]
+            then
+              git push https://heroku:$HEROKU_API_KEY@git.heroku.com/moviesfx.git ${CIRCLE_BRANCH}:master -f
+            else
+              git push https://heroku:$HEROKU_API_KEY@git.heroku.com/moviesfx-dev.git ${CIRCLE_BRANCH}:master -f
+            fi
+  notify-via-slack:
+    executor: slack-executor
+    steps:
+      - run: echo "Slack notification"
+      - slack/notify:
+          event: 'always'
+          channel: 'project'
+          template: ''
+          custom: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "${CIRCLE_BRANCH} branch deployment to heroku is complete. 👍",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Project*:\n$CIRCLE_PROJECT_REPONAME"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch*:\n$CIRCLE_BRANCH"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*When*:\n$(date +'%m/%d/%Y %T')"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Build*:\n$CIRCLE_BUILD_NUM"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Author*:\n$CIRCLE_PROJECT_USERNAME"
+                    }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Job"
+                      },
+                      "url": "${CIRCLE_BUILD_URL}"
+                    }
+                  ]
+                }
+              ]
+            }
+  
+workflows:
+  build_and_deploy:
+    jobs:
+      - build
+      - linting:
+          requires:
+            - build
+          filters:
+            branches:
+              only:
+                - develop
+                - main
+      - prettier:
+          requires:
+            - build
+          filters:
+            branches:
+              only:
+                - develop
+                - main
+      - deploy-to-heroku:
+          requires:
+            - linting
+            - prettier
+          filters:
+            branches:
+              only:
+                - develop
+                - main
+      - notify-via-slack:
+          requires:
+            - deploy-to-heroku
+          filters:
+            branches:
+              only:
+                - develop
+                - main
