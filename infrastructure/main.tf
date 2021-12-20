@@ -22,7 +22,7 @@ locals {
 }
 
 resource "aws_s3_bucket" "moviesfx_s3_bucket" {
-  bucket        = "${local.prefix}"
+  bucket        = local.prefix
   acl           = "public-read"
   force_destroy = true
 
